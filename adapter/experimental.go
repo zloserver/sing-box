@@ -17,6 +17,10 @@ type ClashServer interface {
 	HistoryStorage() URLTestHistoryStorage
 }
 
+type ZloApiServer interface {
+	LifecycleService
+}
+
 type URLTestHistory struct {
 	Time  time.Time `json:"time"`
 	Delay uint16    `json:"delay"`

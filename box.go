@@ -130,6 +130,8 @@ func New(options Options) (*Box, error) {
 	var needCacheFile bool
 	var needClashAPI bool
 	var needV2RayAPI bool
+	var needZloAPI bool
+
 	if experimentalOptions.CacheFile != nil && experimentalOptions.CacheFile.Enabled || options.PlatformLogWriter != nil {
 		needCacheFile = true
 	}
@@ -139,6 +141,10 @@ func New(options Options) (*Box, error) {
 	if experimentalOptions.V2RayAPI != nil && experimentalOptions.V2RayAPI.Listen != "" {
 		needV2RayAPI = true
 	}
+	if experimentalOptions.ZloAPI != nil {
+		needZloAPI = true
+	}
+
 	platformInterface := service.FromContext[platform.Interface](ctx)
 	var defaultLogWriter io.Writer
 	if platformInterface != nil {
@@ -362,6 +368,15 @@ func New(options Options) (*Box, error) {
 			internalServices = append(internalServices, v2rayServer)
 			service.MustRegister[adapter.V2RayServer](ctx, v2rayServer)
 		}
+	}
+	if needZloAPI {
+		zloAPIOptions := common.PtrValueOrDefault(experimentalOptions.ZloAPI)
+		zloAPIServer, err := experimental.NewZloApiServer(ctx, logFactory.(log.ObservableFactory), zloAPIOptions)
+		if err != nil {
+			return nil, E.Cause(err, "create zlo-api-server")
+		}
+		service.MustRegister[adapter.ZloApiServer](ctx, zloAPIServer)
+		internalServices = append(internalServices, zloAPIServer)
 	}
 	if ntpOptions.Enabled {
 		ntpDialer, err := dialer.New(ctx, ntpOptions.DialerOptions, ntpOptions.ServerIsDomain())

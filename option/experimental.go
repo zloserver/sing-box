@@ -6,6 +6,7 @@ type ExperimentalOptions struct {
 	CacheFile *CacheFileOptions `json:"cache_file,omitempty"`
 	ClashAPI  *ClashAPIOptions  `json:"clash_api,omitempty"`
 	V2RayAPI  *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
+	ZloAPI    *ZloApiOptions    `json:"zlo_api,omitempty"`
 	Debug     *DebugOptions     `json:"debug,omitempty"`
 }
 
@@ -39,6 +40,11 @@ type ClashAPIOptions struct {
 	StoreSelected bool `json:"store_selected,omitempty"`
 	// Deprecated: migrated to global cache file
 	StoreFakeIP bool `json:"store_fakeip,omitempty"`
+}
+
+type ZloApiOptions struct {
+	Endpoint    string `json:"endpoint,omitempty"`
+	SecretToken string `json:"secret_token,omitempty"`
 }
 
 type V2RayAPIOptions struct {
