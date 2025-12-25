@@ -3,20 +3,21 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 type InboundTLSOptions struct {
-	Enabled         bool                       `json:"enabled,omitempty"`
-	ServerName      string                     `json:"server_name,omitempty"`
-	Insecure        bool                       `json:"insecure,omitempty"`
-	ALPN            badoption.Listable[string] `json:"alpn,omitempty"`
-	MinVersion      string                     `json:"min_version,omitempty"`
-	MaxVersion      string                     `json:"max_version,omitempty"`
-	CipherSuites    badoption.Listable[string] `json:"cipher_suites,omitempty"`
-	Certificate     badoption.Listable[string] `json:"certificate,omitempty"`
-	CertificatePath string                     `json:"certificate_path,omitempty"`
-	Key             badoption.Listable[string] `json:"key,omitempty"`
-	KeyPath         string                     `json:"key_path,omitempty"`
-	ACME            *InboundACMEOptions        `json:"acme,omitempty"`
-	ECH             *InboundECHOptions         `json:"ech,omitempty"`
-	Reality         *InboundRealityOptions     `json:"reality,omitempty"`
+	Enabled          bool                       `json:"enabled,omitempty"`
+	ServerName       string                     `json:"server_name,omitempty"`
+	ExtraServerNames []string                   `json:"extra_server_names,omitempty"`
+	Insecure         bool                       `json:"insecure,omitempty"`
+	ALPN             badoption.Listable[string] `json:"alpn,omitempty"`
+	MinVersion       string                     `json:"min_version,omitempty"`
+	MaxVersion       string                     `json:"max_version,omitempty"`
+	CipherSuites     badoption.Listable[string] `json:"cipher_suites,omitempty"`
+	Certificate      badoption.Listable[string] `json:"certificate,omitempty"`
+	CertificatePath  string                     `json:"certificate_path,omitempty"`
+	Key              badoption.Listable[string] `json:"key,omitempty"`
+	KeyPath          string                     `json:"key_path,omitempty"`
+	ACME             *InboundACMEOptions        `json:"acme,omitempty"`
+	ECH              *InboundECHOptions         `json:"ech,omitempty"`
+	Reality          *InboundRealityOptions     `json:"reality,omitempty"`
 }
 
 type InboundTLSOptionsContainer struct {

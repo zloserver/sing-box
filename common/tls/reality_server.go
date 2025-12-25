@@ -84,6 +84,9 @@ func NewRealityServer(ctx context.Context, logger log.Logger, options option.Inb
 	tlsConfig.Dest = options.Reality.Handshake.ServerOptions.Build().String()
 
 	tlsConfig.ServerNames = map[string]bool{options.ServerName: true}
+	for _, name := range options.ExtraServerNames {
+		tlsConfig.ServerNames[name] = true
+	}
 	privateKey, err := base64.RawURLEncoding.DecodeString(options.Reality.PrivateKey)
 	if err != nil {
 		return nil, E.Cause(err, "decode private key")
