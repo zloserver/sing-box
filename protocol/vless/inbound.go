@@ -43,8 +43,8 @@ type Inbound struct {
 	service   *vless.Service[int]
 	tlsConfig tls.ServerConfig
 	transport adapter.V2RayServerTransport
-	tracker   *ActiveUserTracker
-	ipTracker *ActiveUserTracker
+	tracker   *ConnectionTracker
+	ipTracker *ConnectionTracker
 }
 
 func GetVlessUsers(currInbound adapter.Inbound) []option.VLESSUser {
@@ -80,7 +80,7 @@ func GetVlessActiveUserCount(currInbound adapter.Inbound) int {
 		return 0
 	}
 
-	return vlessInbound.tracker.GetActiveCount()
+	return vlessInbound.tracker.Count()
 }
 
 func GetVlessActiveIpCount(currInbound adapter.Inbound) int {
@@ -89,7 +89,7 @@ func GetVlessActiveIpCount(currInbound adapter.Inbound) int {
 		return 0
 	}
 
-	return vlessInbound.ipTracker.GetActiveCount()
+	return vlessInbound.ipTracker.Count()
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSInboundOptions) (adapter.Inbound, error) {
@@ -99,8 +99,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		router:    uot.NewRouter(router, logger),
 		logger:    logger,
 		users:     options.Users,
-		tracker:   NewActiveUserTracker(),
-		ipTracker: NewActiveUserTracker(),
+		tracker:   NewConnectionTracker(),
+		ipTracker: NewConnectionTracker(),
 	}
 	var err error
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
@@ -218,10 +218,18 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 	} else {
 		metadata.User = user
 	}
-	h.tracker.RecordRequest(user)
-	h.ipTracker.RecordRequest(metadata.Source.AddrString())
+	ip := metadata.Source.AddrString()
+	h.tracker.Add(user)
+	h.ipTracker.Add(ip)
+	wrappedOnClose := N.CloseHandlerFunc(func(err error) {
+		h.tracker.Remove(user)
+		h.ipTracker.Remove(ip)
+		if onClose != nil {
+			onClose(err)
+		}
+	})
 	h.logger.InfoContext(ctx, "[", user, "/", metadata.Source.String(), "] inbound connection to ", metadata.Destination)
-	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+	h.router.RouteConnectionEx(ctx, conn, metadata, wrappedOnClose)
 }
 
 func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -238,8 +246,16 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	} else {
 		metadata.User = user
 	}
-	h.tracker.RecordRequest(user)
-	h.ipTracker.RecordRequest(metadata.Source.AddrString())
+	ip := metadata.Source.AddrString()
+	h.tracker.Add(user)
+	h.ipTracker.Add(ip)
+	wrappedOnClose := func(err error) {
+		h.tracker.Remove(user)
+		h.ipTracker.Remove(ip)
+		if onClose != nil {
+			onClose(err)
+		}
+	}
 	if metadata.Destination.Fqdn == packetaddr.SeqPacketMagicAddress {
 		metadata.Destination = M.Socksaddr{}
 		conn = packetaddr.NewConn(bufio.NewNetPacketConn(conn), metadata.Destination)
@@ -247,7 +263,7 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	} else {
 		h.logger.InfoContext(ctx, "[", user, "/", metadata.Source.String(), "] inbound packet connection to ", metadata.Destination)
 	}
-	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+	h.router.RoutePacketConnectionEx(ctx, conn, metadata, wrappedOnClose)
 }
 
 var _ adapter.V2RayServerTransportHandler = (*inboundTransportHandler)(nil)
