@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -35,7 +36,48 @@ type Inbound struct {
 	listener     *listener.Listener
 	tlsConfig    tls.ServerConfig
 	service      *hysteria2.Service[int]
+	usersAccess  sync.RWMutex
+	users        []option.Hysteria2User
 	userNameList []string
+}
+
+// GetHysteria2Users returns the current user list of a hysteria2 inbound.
+// It returns an empty slice for any other inbound type.
+func GetHysteria2Users(currInbound adapter.Inbound) []option.Hysteria2User {
+	h2Inbound, ok := currInbound.(*Inbound)
+	if !ok {
+		return []option.Hysteria2User{}
+	}
+
+	h2Inbound.usersAccess.RLock()
+	defer h2Inbound.usersAccess.RUnlock()
+	return h2Inbound.users
+}
+
+// SetHysteria2Users hot-swaps the user list of a hysteria2 inbound without a
+// restart. It returns false if currInbound is not a hysteria2 inbound.
+func SetHysteria2Users(currInbound adapter.Inbound, users []option.Hysteria2User) bool {
+	h2Inbound, ok := currInbound.(*Inbound)
+	if !ok {
+		return false
+	}
+
+	userList := make([]int, len(users))
+	userNameList := make([]string, len(users))
+	userPasswordList := make([]string, len(users))
+	for index, user := range users {
+		userList[index] = index
+		userNameList[index] = user.Name
+		userPasswordList[index] = user.Password
+	}
+
+	h2Inbound.usersAccess.Lock()
+	defer h2Inbound.usersAccess.Unlock()
+	h2Inbound.users = users
+	h2Inbound.userNameList = userNameList
+	h2Inbound.service.UpdateUsers(userList, userPasswordList)
+
+	return true
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2InboundOptions) (adapter.Inbound, error) {
@@ -139,8 +181,20 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}
 	service.UpdateUsers(userList, userPasswordList)
 	inbound.service = service
+	inbound.users = options.Users
 	inbound.userNameList = userNameList
 	return inbound, nil
+}
+
+// userName returns the configured name for a user index in a thread-safe way,
+// tolerating a concurrent user-list swap.
+func (h *Inbound) userName(userID int) string {
+	h.usersAccess.RLock()
+	defer h.usersAccess.RUnlock()
+	if userID < 0 || userID >= len(h.userNameList) {
+		return ""
+	}
+	return h.userNameList[userID]
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -157,7 +211,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
 	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	if userName := h.userName(userID); userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
@@ -180,7 +234,7 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
 	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userNameList[userID]; userName != "" {
+	if userName := h.userName(userID); userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {

@@ -7,7 +7,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/vless"
 )
 
@@ -37,24 +39,47 @@ func findInboundByTag(server *Server) func(next http.Handler) http.Handler {
 
 func getInboundUsers(server *Server) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		inbound := r.Context().Value(CtxKeyInbound).(adapter.TCPInjectableInbound)
+		inbound, _ := r.Context().Value(CtxKeyInbound).(adapter.Inbound)
 
-		render.JSON(w, r, vless.GetVlessUsers(inbound))
+		switch inbound.Type() {
+		case C.TypeHysteria2:
+			render.JSON(w, r, hysteria2.GetHysteria2Users(inbound))
+		case C.TypeVLESS:
+			render.JSON(w, r, vless.GetVlessUsers(inbound))
+		default:
+			render.Status(r, http.StatusUnprocessableEntity)
+			render.JSON(w, r, ErrUnsupportedInbound)
+		}
 	}
 }
 
 func setInboundUsers(server *Server) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req []option.VLESSUser
-		if err := render.DecodeJSON(r.Body, &req); err != nil {
-			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, ErrBadRequest)
-			return
-		}
+		inbound, _ := r.Context().Value(CtxKeyInbound).(adapter.Inbound)
 
-		inbound := r.Context().Value(CtxKeyInbound).(adapter.TCPInjectableInbound)
-		vless.SetVlessUsers(inbound, req)
-		render.NoContent(w, r)
+		switch inbound.Type() {
+		case C.TypeHysteria2:
+			var req []option.Hysteria2User
+			if err := render.DecodeJSON(r.Body, &req); err != nil {
+				render.Status(r, http.StatusBadRequest)
+				render.JSON(w, r, ErrBadRequest)
+				return
+			}
+			hysteria2.SetHysteria2Users(inbound, req)
+			render.NoContent(w, r)
+		case C.TypeVLESS:
+			var req []option.VLESSUser
+			if err := render.DecodeJSON(r.Body, &req); err != nil {
+				render.Status(r, http.StatusBadRequest)
+				render.JSON(w, r, ErrBadRequest)
+				return
+			}
+			vless.SetVlessUsers(inbound, req)
+			render.NoContent(w, r)
+		default:
+			render.Status(r, http.StatusUnprocessableEntity)
+			render.JSON(w, r, ErrUnsupportedInbound)
+		}
 	}
 }
 
