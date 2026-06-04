@@ -16,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -89,6 +90,8 @@ func getStats(server *Server) func(w http.ResponseWriter, r *http.Request) {
 		for _, inbound := range server.inbound.Inbounds() {
 			activeUsers += vless.GetVlessActiveUserCount(inbound)
 			activeIps += vless.GetVlessActiveIpCount(inbound)
+			activeUsers += hysteria2.GetHysteria2ActiveUserCount(inbound)
+			activeIps += hysteria2.GetHysteria2ActiveIpCount(inbound)
 		}
 
 		render.JSON(w, r, render.M{

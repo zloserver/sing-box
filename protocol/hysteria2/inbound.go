@@ -21,6 +21,7 @@ import (
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
 	E "github.com/sagernet/sing/common/exceptions"
+	F "github.com/sagernet/sing/common/format"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -39,6 +40,26 @@ type Inbound struct {
 	usersAccess  sync.RWMutex
 	users        []option.Hysteria2User
 	userNameList []string
+	tracker      *ConnectionTracker
+	ipTracker    *ConnectionTracker
+}
+
+func GetHysteria2ActiveUserCount(currInbound adapter.Inbound) int {
+	h2Inbound, ok := currInbound.(*Inbound)
+	if !ok {
+		return 0
+	}
+
+	return h2Inbound.tracker.Count()
+}
+
+func GetHysteria2ActiveIpCount(currInbound adapter.Inbound) int {
+	h2Inbound, ok := currInbound.(*Inbound)
+	if !ok {
+		return 0
+	}
+
+	return h2Inbound.ipTracker.Count()
 }
 
 // GetHysteria2Users returns the current user list of a hysteria2 inbound.
@@ -148,6 +169,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			Listen:  options.ListenOptions,
 		}),
 		tlsConfig: tlsConfig,
+		tracker:   NewConnectionTracker(),
+		ipTracker: NewConnectionTracker(),
 	}
 	var udpTimeout time.Duration
 	if options.UDPTimeout != 0 {
@@ -197,6 +220,28 @@ func (h *Inbound) userName(userID int) string {
 	return h.userNameList[userID]
 }
 
+// trackConnection registers an active connection for the given user index and
+// source IP, returning the configured user name (may be empty) and an onClose
+// handler that releases the tracked entries when the connection ends.
+func (h *Inbound) trackConnection(userID int, source M.Socksaddr, onClose N.CloseHandlerFunc) (string, N.CloseHandlerFunc) {
+	userName := h.userName(userID)
+	trackKey := userName
+	if trackKey == "" {
+		trackKey = F.ToString(userID)
+	}
+	ip := source.AddrString()
+	h.tracker.Add(trackKey)
+	h.ipTracker.Add(ip)
+	wrappedOnClose := N.CloseHandlerFunc(func(err error) {
+		h.tracker.Remove(trackKey)
+		h.ipTracker.Remove(ip)
+		if onClose != nil {
+			onClose(err)
+		}
+	})
+	return userName, wrappedOnClose
+}
+
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	ctx = log.ContextWithNewID(ctx)
 	var metadata adapter.InboundContext
@@ -211,13 +256,14 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
 	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userName(userID); userName != "" {
+	userName, wrappedOnClose := h.trackConnection(userID, source, onClose)
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	}
-	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+	h.router.RouteConnectionEx(ctx, conn, metadata, wrappedOnClose)
 }
 
 func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -234,13 +280,14 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
 	userID, _ := auth.UserFromContext[int](ctx)
-	if userName := h.userName(userID); userName != "" {
+	userName, wrappedOnClose := h.trackConnection(userID, source, onClose)
+	if userName != "" {
 		metadata.User = userName
 		h.logger.InfoContext(ctx, "[", userName, "] inbound packet connection to ", metadata.Destination)
 	} else {
 		h.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
 	}
-	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+	h.router.RoutePacketConnectionEx(ctx, conn, metadata, wrappedOnClose)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
