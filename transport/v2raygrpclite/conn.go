@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
 	"github.com/sagernet/sing/common/buf"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/varbin"
 )
@@ -27,6 +29,7 @@ type GunConn struct {
 	flusher       http.Flusher
 	create        chan struct{}
 	err           error
+	readMutex     sync.Mutex
 	readRemaining int
 }
 
@@ -61,6 +64,21 @@ func (c *GunConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
+	// The underlying *bufio.Reader is not safe for concurrent use. Under certain
+	// deadline/teardown races the gRPC-lite framing can corrupt its internal
+	// state, producing a "index out of range" runtime panic inside ReadByte.
+	// Serialize reads so the reader state can never be corrupted, and recover
+	// from any residual panic so a single connection can never take the whole
+	// process down: it is turned into a normal connection error instead.
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			n = 0
+			err = E.New("v2ray-grpc: recovered from panic in read: ", r)
+		}
+	}()
+
 	if c.reader == nil {
 		<-c.create
 		if c.err != nil {
