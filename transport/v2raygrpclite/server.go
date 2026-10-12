@@ -45,6 +45,11 @@ func NewServer(ctx context.Context, logger logger.ContextLogger, options option.
 		path:      "/" + options.ServiceName + "/Tun",
 		h2Server: &http2.Server{
 			IdleTimeout: time.Duration(options.IdleTimeout),
+			// Every proxied TCP connection and every UDP flow is a stream of the client's single
+			// HTTP/2 connection, and grpc-go clients (Xray) wait for a free slot instead of dialing
+			// a new connection. Xray keeps a UDP flow's stream for a minute after its last packet,
+			// so DNS through the tunnel alone can use up the x/net default of 250.
+			MaxConcurrentStreams: 4096,
 		},
 	}
 	server.httpServer = &http.Server{
@@ -85,8 +90,22 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	s.handler.NewConnectionEx(request.Context(), conn, sHttp.SourceAddress(request), M.Socksaddr{}, N.OnceClose(func(it error) {
 		close(done)
 	}))
-	<-done
+	select {
+	case <-done:
+	case <-request.Context().Done():
+		// The client reset the stream or the HTTP/2 connection is gone. When the proxied
+		// connection is half-closed and the destination stays silent, nothing reads or writes
+		// this stream anymore, so onClose never fires and the handler would never return.
+		// Every such handler holds one of the connection's MaxConcurrentStreams slots, and
+		// once they are all taken x/net/http2 queues new streams without starting them:
+		// existing connections keep working while every new one hangs.
+		conn.Close()
+	}
 	conn.CloseWrapper()
+	// End the stream the way a gRPC server does. Without the grpc-status trailer grpc-go
+	// clients (Xray) fail the stream and may drop the messages received last, so the tail
+	// of a download is lost whenever the destination closes right after sending.
+	writer.Header().Set(http.TrailerPrefix+"Grpc-Status", "0")
 }
 
 func (s *Server) invalidRequest(writer http.ResponseWriter, request *http.Request, statusCode int, err error) {
