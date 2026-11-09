@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -35,16 +36,17 @@ var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
 
 type Inbound struct {
 	inbound.Adapter
-	ctx       context.Context
-	router    adapter.ConnectionRouterEx
-	logger    logger.ContextLogger
-	listener  *listener.Listener
-	users     []option.VLESSUser
-	service   *vless.Service[int]
-	tlsConfig tls.ServerConfig
-	transport adapter.V2RayServerTransport
-	tracker   *ConnectionTracker
-	ipTracker *ConnectionTracker
+	ctx         context.Context
+	router      adapter.ConnectionRouterEx
+	logger      logger.ContextLogger
+	listener    *listener.Listener
+	usersAccess sync.RWMutex
+	users       []option.VLESSUser
+	service     *vless.Service[int]
+	tlsConfig   tls.ServerConfig
+	transport   adapter.V2RayServerTransport
+	tracker     *ConnectionTracker
+	ipTracker   *ConnectionTracker
 }
 
 func GetVlessUsers(currInbound adapter.Inbound) []option.VLESSUser {
@@ -53,6 +55,8 @@ func GetVlessUsers(currInbound adapter.Inbound) []option.VLESSUser {
 		return []option.VLESSUser{}
 	}
 
+	vlessInbound.usersAccess.RLock()
+	defer vlessInbound.usersAccess.RUnlock()
 	return vlessInbound.users
 }
 
@@ -62,6 +66,8 @@ func SetVlessUsers(currInbound adapter.Inbound, users []option.VLESSUser) bool {
 		return false
 	}
 
+	vlessInbound.usersAccess.Lock()
+	defer vlessInbound.usersAccess.Unlock()
 	vlessInbound.users = users
 	vlessInbound.service.UpdateUsers(common.MapIndexed(vlessInbound.users, func(index int, _ option.VLESSUser) int {
 		return index
@@ -72,6 +78,17 @@ func SetVlessUsers(currInbound adapter.Inbound, users []option.VLESSUser) bool {
 	}))
 
 	return true
+}
+
+// userName returns the configured name for a user index in a thread-safe way,
+// tolerating a concurrent user-list swap by SetVlessUsers.
+func (h *Inbound) userName(userIndex int) string {
+	h.usersAccess.RLock()
+	defer h.usersAccess.RUnlock()
+	if userIndex < 0 || userIndex >= len(h.users) {
+		return ""
+	}
+	return h.users[userIndex].Name
 }
 
 func GetVlessActiveUserCount(currInbound adapter.Inbound) int {
@@ -212,7 +229,7 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
+	user := h.userName(userIndex)
 	if user == "" {
 		user = F.ToString(userIndex)
 	} else {
@@ -221,7 +238,7 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 	ip := metadata.Source.AddrString()
 	h.tracker.Add(user)
 	h.ipTracker.Add(ip)
-	wrappedOnClose := N.CloseHandlerFunc(func(err error) {
+	wrappedOnClose := N.OnceClose(func(err error) {
 		h.tracker.Remove(user)
 		h.ipTracker.Remove(ip)
 		if onClose != nil {
@@ -240,7 +257,7 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 		return
 	}
-	user := h.users[userIndex].Name
+	user := h.userName(userIndex)
 	if user == "" {
 		user = F.ToString(userIndex)
 	} else {
@@ -249,13 +266,13 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	ip := metadata.Source.AddrString()
 	h.tracker.Add(user)
 	h.ipTracker.Add(ip)
-	wrappedOnClose := func(err error) {
+	wrappedOnClose := N.OnceClose(func(err error) {
 		h.tracker.Remove(user)
 		h.ipTracker.Remove(ip)
 		if onClose != nil {
 			onClose(err)
 		}
-	}
+	})
 	if metadata.Destination.Fqdn == packetaddr.SeqPacketMagicAddress {
 		metadata.Destination = M.Socksaddr{}
 		conn = packetaddr.NewConn(bufio.NewNetPacketConn(conn), metadata.Destination)

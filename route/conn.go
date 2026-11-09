@@ -171,8 +171,8 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	}
 	err = N.ReportPacketConnHandshakeSuccess(conn, remotePacketConn)
 	if err != nil {
-		conn.Close()
 		remotePacketConn.Close()
+		N.CloseOnHandshakeFailure(conn, onClose, err)
 		m.logger.ErrorContext(ctx, "report handshake success: ", err)
 		return
 	}
@@ -240,7 +240,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 				_, err := destination.Write(cachedBuffer.Bytes())
 				cachedBuffer.Release()
 				if err != nil {
-					if done.Swap(true) {
+					if !done.Swap(true) {
 						onClose(err)
 					}
 					common.Close(source, destination)
@@ -265,7 +265,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	if earlyConn, isEarlyConn := common.Cast[N.EarlyConn](destinationWriter); isEarlyConn && earlyConn.NeedHandshake() {
 		err := m.connectionCopyEarly(source, destination)
 		if err != nil {
-			if done.Swap(true) {
+			if !done.Swap(true) {
 				onClose(err)
 			}
 			common.Close(source, destination)
@@ -288,8 +288,14 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	} else {
 		destination.Close()
 	}
-	if done.Swap(true) {
+	// Report the connection closed as soon as either direction ends, the same way
+	// packetConnectionCopy does. Waiting for both directions leaves a half-closed
+	// connection unreported until TCP keepalive expires - or indefinitely, while the
+	// peer keeps its socket open - which leaks every onClose driven bookkeeping:
+	// the active user tracker and the connection manager list.
+	if !done.Swap(true) {
 		onClose(err)
+	} else {
 		common.Close(source, destination)
 	}
 	if !direction {

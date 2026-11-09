@@ -232,7 +232,7 @@ func (h *Inbound) trackConnection(userID int, source M.Socksaddr, onClose N.Clos
 	ip := source.AddrString()
 	h.tracker.Add(trackKey)
 	h.ipTracker.Add(ip)
-	wrappedOnClose := N.CloseHandlerFunc(func(err error) {
+	wrappedOnClose := N.OnceClose(func(err error) {
 		h.tracker.Remove(trackKey)
 		h.ipTracker.Remove(ip)
 		if onClose != nil {
