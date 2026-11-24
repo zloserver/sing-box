@@ -146,6 +146,8 @@ type RouteActionOptions struct {
 }
 
 type RawRouteOptionsActionOptions struct {
+	BlockBitTorrent bool `json:"block_bittorrent,omitempty"`
+
 	OverrideAddress string `json:"override_address,omitempty"`
 	OverridePort    uint16 `json:"override_port,omitempty"`
 

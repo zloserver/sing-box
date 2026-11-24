@@ -14,8 +14,10 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
+	R "github.com/sagernet/sing-box/route/rule"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -82,6 +84,19 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		m.logger.ErrorContext(ctx, err)
 		return
 	}
+	outbound, isOutbound := this.(adapter.Outbound)
+	blockTorrent := metadata.BlockBitTorrent && isOutbound && outbound.Type() == C.TypeDirect
+	if blockTorrent {
+		// Fast Open dials on the first write. Start it before waiting for client data.
+		if earlyConn, ok := common.Cast[N.EarlyConn](remoteConn); ok && earlyConn.NeedHandshake() {
+			if _, err = remoteConn.Write(nil); err != nil {
+				remoteConn.Close()
+				N.CloseOnHandshakeFailure(conn, onClose, err)
+				m.logger.ErrorContext(ctx, "open connection: ", err)
+				return
+			}
+		}
+	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
 	if err != nil {
 		err = E.Cause(err, "report handshake success")
@@ -102,8 +117,12 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		m.connections.Remove(element)
 	})
 	var done atomic.Bool
-	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
 	go m.connectionCopy(ctx, remoteConn, conn, true, &done, onClose)
+	if blockTorrent {
+		go m.connectionCopyChecked(ctx, conn, remoteConn, &done, onClose)
+	} else {
+		go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+	}
 }
 
 func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
@@ -220,8 +239,10 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		m.connections.Remove(element)
 	})
 	var done atomic.Bool
-	go m.packetConnectionCopy(ctx, conn, destination, false, &done, onClose)
-	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
+	outbound, isOutbound := this.(adapter.Outbound)
+	blockTorrent := metadata.BlockBitTorrent && isOutbound && outbound.Type() == C.TypeDirect
+	go m.packetConnectionCopy(ctx, conn, destination, false, blockTorrent, &done, onClose)
+	go m.packetConnectionCopy(ctx, destination, conn, true, false, &done, onClose)
 }
 
 func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
@@ -317,6 +338,33 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	}
 }
 
+var errBitTorrentBlocked = (&R.RuleActionReject{Method: C.RuleActionRejectMethodDefault, NoDrop: true}).Error(nil)
+
+func (m *ConnectionManager) connectionCopyChecked(ctx context.Context, source, destination net.Conn, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+	payload := buf.New()
+	err := sniff.ReadBitTorrentPrefix(source, payload)
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, os.ErrInvalid):
+		if payload.IsEmpty() {
+			payload.Release()
+		} else {
+			source = bufio.NewCachedConn(source, payload)
+		}
+		m.connectionCopy(ctx, source, destination, false, done, onClose)
+		return
+	case err == nil:
+		err = errBitTorrentBlocked
+		m.logger.DebugContext(ctx, "blocked BitTorrent stream")
+	default:
+		m.logger.DebugContext(ctx, "read connection upload: ", err)
+	}
+	payload.Release()
+	if !done.Swap(true) {
+		onClose(err)
+	}
+	common.Close(source, destination)
+}
+
 func (m *ConnectionManager) connectionCopyEarly(source net.Conn, destination io.Writer) error {
 	payload := buf.NewPacket()
 	defer payload.Release()
@@ -339,11 +387,36 @@ func (m *ConnectionManager) connectionCopyEarly(source net.Conn, destination io.
 	return nil
 }
 
-func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.PacketReader, destination N.PacketWriter, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
-	_, err := bufio.CopyPacket(destination, source)
+func copyCheckedFirstPacket(ctx context.Context, source N.PacketReader, destination N.PacketWriter) error {
+	options := N.NewReadWaitOptions(source, destination)
+	buffer := options.NewPacketBuffer()
+	address, err := source.ReadPacket(buffer)
+	if err != nil {
+		buffer.Release()
+		return err
+	}
+	var metadata adapter.InboundContext
+	if sniff.BitTorrentPacket(ctx, &metadata, buffer.Bytes()) == nil {
+		buffer.Release()
+		return errBitTorrentBlocked
+	}
+	options.PostReturn(buffer)
+	return destination.WritePacket(buffer, address)
+}
+
+func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.PacketReader, destination N.PacketWriter, direction, blockTorrent bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+	var err error
+	if blockTorrent {
+		err = copyCheckedFirstPacket(ctx, source, destination)
+	}
+	if err == nil {
+		_, err = bufio.CopyPacket(destination, source)
+	}
 	if !direction {
 		if err == nil {
 			m.logger.DebugContext(ctx, "packet upload finished")
+		} else if R.IsRejected(err) {
+			m.logger.DebugContext(ctx, "blocked BitTorrent packet")
 		} else if E.IsClosedOrCanceled(err) {
 			m.logger.TraceContext(ctx, "packet upload closed")
 		} else {

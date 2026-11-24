@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"io"
+	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/sniff"
 	C "github.com/sagernet/sing-box/constant"
 
+	mDNS "github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,4 +111,58 @@ func TestSniffNotUTP(t *testing.T) {
 		err = sniff.UTP(context.TODO(), &metadata, pkt)
 		require.Error(t, err)
 	}
+}
+
+func TestSniffFragmentedBitTorrent(t *testing.T) {
+	t.Parallel()
+
+	const signature = "\x13BitTorrent protocol"
+	for _, reader := range []io.Reader{
+		iotest.OneByteReader(strings.NewReader(signature)),
+		iotest.DataErrReader(strings.NewReader(signature)),
+	} {
+		var metadata adapter.InboundContext
+		require.NoError(t, sniff.BitTorrent(context.Background(), &metadata, reader))
+		require.Equal(t, C.ProtocolBitTorrent, metadata.Protocol)
+	}
+}
+
+func TestSniffBitTorrentDHT(t *testing.T) {
+	t.Parallel()
+
+	const nodeID = "abcdefghij0123456789"
+	const hash = "mnopqrstuvwxyz123456"
+	for _, packet := range []string{
+		"d1:ad2:id20:" + nodeID + "e1:q4:ping1:t2:aa1:y1:qe",
+		"d1:ad2:id20:" + nodeID + "9:info_hash20:" + hash + "e1:q9:get_peers1:t2:aa1:y1:qe",
+		"d1:ad2:id20:" + nodeID + "9:info_hash20:" + hash + "4:porti6881e5:token2:aae1:q13:announce_peer1:t2:aa1:y1:qe",
+	} {
+		var metadata adapter.InboundContext
+		require.NoError(t, sniff.BitTorrentPacket(context.Background(), &metadata, []byte(packet)))
+		require.Equal(t, C.ProtocolBitTorrent, metadata.Protocol)
+	}
+
+	for _, packet := range []string{
+		"d1:ad2:id20:1:y1:qe",
+		"d1:rd2:id20:" + nodeID + "e1:t2:aa1:y1:re",
+		"d1:ad2:id20:" + nodeID + "e1:q6:custom1:t2:aa1:y1:qe",
+	} {
+		var metadata adapter.InboundContext
+		require.Error(t, sniff.BitTorrentPacket(context.Background(), &metadata, []byte(packet)))
+		require.Empty(t, metadata.Protocol)
+	}
+}
+
+func TestSniffBitTorrentDoesNotRejectDNS(t *testing.T) {
+	t.Parallel()
+
+	var query mDNS.Msg
+	query.SetQuestion("example.org.", mDNS.TypeA)
+	query.Id = 0x4100
+	packet, err := query.Pack()
+	require.NoError(t, err)
+
+	var metadata adapter.InboundContext
+	require.Error(t, sniff.BitTorrentPacket(context.Background(), &metadata, packet))
+	require.Empty(t, metadata.Protocol)
 }

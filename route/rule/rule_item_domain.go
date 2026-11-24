@@ -71,7 +71,9 @@ func (r *DomainItem) Match(metadata *adapter.InboundContext) bool {
 	if domainHost == "" {
 		return false
 	}
-	return r.matcher.Match(strings.ToLower(domainHost))
+	domainHost = strings.ToLower(domainHost)
+	return r.matcher.Match(domainHost) ||
+		(strings.HasSuffix(domainHost, ".") && r.matcher.Match(strings.TrimSuffix(domainHost, ".")))
 }
 
 func (r *DomainItem) String() string {

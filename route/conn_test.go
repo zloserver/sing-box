@@ -1,7 +1,9 @@
 package route
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -120,5 +122,44 @@ func TestConnectionCopyReportsCloseOnce(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if count := closeCount.Load(); count != 1 {
 		t.Fatal("expected exactly one close report, got ", count)
+	}
+}
+
+type recordingConn struct {
+	net.Conn
+	writes chan int
+}
+
+func (c *recordingConn) Write(data []byte) (int, error) {
+	c.writes <- len(data)
+	return c.Conn.Write(data)
+}
+
+func TestConnectionCopyCheckedKeepsInitialWrite(t *testing.T) {
+	t.Parallel()
+
+	client, inbound := net.Pipe()
+	target, outbound := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		inbound.Close()
+		target.Close()
+		outbound.Close()
+	})
+	target.SetReadDeadline(time.Now().Add(5 * time.Second))
+	payload := bytes.Repeat([]byte("ordinary traffic"), 64)
+	go func() { _, _ = client.Write(payload) }()
+
+	observed := &recordingConn{Conn: outbound, writes: make(chan int, 2)}
+	manager := NewConnectionManager(logger.NOP())
+	var done atomic.Bool
+	go manager.connectionCopyChecked(context.Background(), inbound, observed, &done, func(error) {})
+
+	received := make([]byte, len(payload))
+	if _, err := io.ReadFull(target, received); err != nil {
+		t.Fatal(err)
+	}
+	if size := <-observed.writes; size != len(payload) || !bytes.Equal(payload, received) {
+		t.Fatalf("first write was split or lost: %d bytes, expected %d", size, len(payload))
 	}
 }

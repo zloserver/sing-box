@@ -147,11 +147,12 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 
 func (r *Router) RoutePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
 	done := make(chan interface{})
-	err := r.routePacketConnection(ctx, conn, metadata, N.OnceClose(func(it error) {
+	onClose := N.OnceClose(func(it error) {
 		close(done)
-	}))
+	})
+	err := r.routePacketConnection(ctx, conn, metadata, onClose)
 	if err != nil {
-		conn.Close()
+		N.CloseOnHandshakeFailure(conn, onClose, err)
 		if E.IsClosedOrCanceled(err) || R.IsRejected(err) {
 			r.logger.DebugContext(ctx, "connection closed: ", err)
 		} else {
@@ -450,6 +451,9 @@ match:
 			if routeOptions.TLSRecordFragment {
 				metadata.TLSRecordFragment = true
 			}
+			if routeOptions.BlockBitTorrent {
+				metadata.BlockBitTorrent = true
+			}
 		}
 		switch action := currentRule.Action().(type) {
 		case *R.RuleActionSniff:
@@ -486,6 +490,11 @@ match:
 		}
 	}
 	return
+}
+
+type packetSniffRead struct {
+	destination M.Socksaddr
+	err         error
 }
 
 func (r *Router) actionSniff(
@@ -605,8 +614,7 @@ func (r *Router) actionSniff(
 		for {
 			var (
 				sniffBuffer = buf.NewPacket()
-				destination M.Socksaddr
-				done        = make(chan struct{})
+				readResult  = make(chan packetSniffRead)
 			)
 			go func() {
 				sniffTimeout := C.ReadPayloadTimeout
@@ -614,12 +622,18 @@ func (r *Router) actionSniff(
 					sniffTimeout = action.Timeout
 				}
 				inputPacketConn.SetReadDeadline(time.Now().Add(sniffTimeout))
-				destination, err = inputPacketConn.ReadPacket(sniffBuffer)
+				destination, readErr := inputPacketConn.ReadPacket(sniffBuffer)
 				inputPacketConn.SetReadDeadline(time.Time{})
-				close(done)
+				select {
+				case readResult <- packetSniffRead{destination, readErr}:
+				case <-ctx.Done():
+					sniffBuffer.Release()
+				}
 			}()
+			var destination M.Socksaddr
 			select {
-			case <-done:
+			case result := <-readResult:
+				destination, err = result.destination, result.err
 			case <-ctx.Done():
 				inputPacketConn.Close()
 				fatalErr = ctx.Err()

@@ -42,6 +42,7 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 				TLSFragment:               action.RouteOptions.TLSFragment,
 				TLSFragmentFallbackDelay:  time.Duration(action.RouteOptions.TLSFragmentFallbackDelay),
 				TLSRecordFragment:         action.RouteOptions.TLSRecordFragment,
+				BlockBitTorrent:           action.RouteOptions.BlockBitTorrent,
 			},
 		}, nil
 	case C.RuleActionTypeRouteOptions:
@@ -56,6 +57,7 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 			TLSFragment:               action.RouteOptionsOptions.TLSFragment,
 			TLSFragmentFallbackDelay:  time.Duration(action.RouteOptionsOptions.TLSFragmentFallbackDelay),
 			TLSRecordFragment:         action.RouteOptionsOptions.TLSRecordFragment,
+			BlockBitTorrent:           action.RouteOptionsOptions.BlockBitTorrent,
 		}, nil
 	case C.RuleActionTypeDirect:
 		directDialer, err := dialer.New(ctx, option.DialerOptions(action.DirectOptions), false)
@@ -172,6 +174,7 @@ type RuleActionRouteOptions struct {
 	TLSFragment               bool
 	TLSFragmentFallbackDelay  time.Duration
 	TLSRecordFragment         bool
+	BlockBitTorrent           bool
 }
 
 func (r *RuleActionRouteOptions) Type() string {
@@ -219,6 +222,9 @@ func (r *RuleActionRouteOptions) Descriptions() []string {
 	}
 	if r.TLSRecordFragment {
 		descriptions = append(descriptions, "tls-record-fragment")
+	}
+	if r.BlockBitTorrent {
+		descriptions = append(descriptions, "block-bittorrent")
 	}
 	return descriptions
 }
@@ -389,8 +395,7 @@ func (r *RuleActionSniff) build() error {
 			r.PacketSniffers = append(r.PacketSniffers, sniff.STUNMessage)
 		case C.ProtocolBitTorrent:
 			r.StreamSniffers = append(r.StreamSniffers, sniff.BitTorrent)
-			r.PacketSniffers = append(r.PacketSniffers, sniff.UTP)
-			r.PacketSniffers = append(r.PacketSniffers, sniff.UDPTracker)
+			r.PacketSniffers = append(r.PacketSniffers, sniff.BitTorrentPacket)
 		case C.ProtocolDTLS:
 			r.PacketSniffers = append(r.PacketSniffers, sniff.DTLSRecord)
 		case C.ProtocolSSH:
